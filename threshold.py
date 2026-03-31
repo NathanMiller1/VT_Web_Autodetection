@@ -21,15 +21,21 @@ def apply_ensemble_logic(met_test):
     
     # Selected threshold methods
     all_selected = st.session_state.get('selected_options', [])
+    
+    # Ensure selected methods exist in the dataset
+    all_selected = [col for col in all_selected if col in met_test.exercise_df.columns]
+    
+    # Remove masks for smoothing
     all_selected_no_mask = [item for item in all_selected if "Mask" not in item]
     
     if smooth_scope == "Both (Individual + Average)":
         # This updates met_test.exercise_df_edited and all its error columns
         met_test.apply_smoothing(active_smooth, smooth_val, all_selected_no_mask)
-        #for col in all_selected_no_mask:
-        #    met_test.exercise_df_edited[col] = met_test._normalize_errors(met_test.exercise_df_edited[col])
+        df = met_test.exercise_df_edited
+    else:
+        met_test.exercise_df_edited = met_test.exercise_df.copy()
+        df = met_test.exercise_df_edited
 
-    df = met_test.exercise_df_edited
     df['Ensemble_Error'] = df[all_selected].mean(axis=1)
 
     # Final Smoothing pass on the Ensemble error
@@ -73,7 +79,7 @@ def populate_threshold_tab(met_test):
         
     with c2:
         # Match names to the keys created in MetabolicTest.update_error_values
-        opts = ["FatMaxMask", "RER>1.0Mask", "V-Slope", "VCO2vs.VO2", "Ve/VO2vs.VO2", "ExcessCO2vs.VO2", "RER=0.85", "PetO2vs.VO2"]
+        opts = ["FatMaxMask", "RER>1.0Mask", "V-Slope", "VCO2vs.VO2", "VE/VO2vs.VO2", "ExcessCO2vs.VO2", "RER=0.85", "PetO2vs.VO2"]
         default_opts = ["FatMaxMask", "RER>1.0Mask", "VCO2vs.VO2", "ExcessCO2vs.VO2", "RER=0.85"]
         st.multiselect("Ensemble Components", options=opts, default=default_opts, key="selected_options")
         
@@ -115,14 +121,14 @@ def populate_threshold_tab(met_test):
         st.button("⬅️ Previous", on_click=decrement_idx, args=("manual_vt1_idx",), key="manual_vt1_prev")
         st.button("Next ➡️", on_click=increment_idx, args=(len(df) - 1, "manual_vt1_idx"), key="manual_vt1_next")
     with col2:
-        st.write(f"**Time:** {str(df.iloc[vt1_idx]["Time_Delta"]).split('days ')[-1].split('.')[0]}")
-        st.write(f"**VO2:** {df.iloc[vt1_idx]["VO2"]:.3f} L/min")
-        st.write(f"**% VO2Max:** {((df.iloc[vt1_idx]["VO2"] / df["VO2"].max()) * 100):.1f} %")
-        st.write(f"**VCO2:** {df.iloc[vt1_idx]["VCO2"]:.3f} L/min")
+        st.write(f"**Time:** {str(df.iloc[vt1_idx]['Time']).split('days ')[-1].split('.')[0]}")
+        st.write(f"**VO2:** {df.iloc[vt1_idx]['VO2']:.3f} L/min")
+        st.write(f"**% VO2Max:** {((df.iloc[vt1_idx]['VO2'] / df["VO2"].max()) * 100):.1f} %")
+        st.write(f"**VCO2:** {df.iloc[vt1_idx]['VCO2']:.3f} L/min")
     with col3:
-        st.write(f"**RER:** {df.iloc[vt1_idx]["VCO2"] / df.iloc[vt1_idx]["VO2"]:.2f}")
-        st.write(f"**HR:** {df.iloc[vt1_idx]["HR"]:.0f}")
-        st.write(f"**% HRMax:** {((df.iloc[vt1_idx]["HR"] / df["HR"].max()) * 100):.1f} %")
+        st.write(f"**RER:** {df.iloc[vt1_idx]['VCO2'] / df.iloc[vt1_idx]["VO2"]:.2f}")
+        st.write(f"**HR:** {df.iloc[vt1_idx]['HR']:.0f}")
+        st.write(f"**% HRMax:** {((df.iloc[vt1_idx]['HR'] / df["HR"].max()) * 100):.1f} %")
     
     # VT2
     with col4:
@@ -130,14 +136,14 @@ def populate_threshold_tab(met_test):
         st.button("⬅️ Previous", on_click=decrement_idx, args=("manual_vt2_idx",), key="manual_vt2_prev")
         st.button("Next ➡️", on_click=increment_idx, args=(len(df) - 1, "manual_vt2_idx"), key="manual_vt2_next")
     with col5:
-        st.write(f"**Time:** {str(df.iloc[vt2_idx]["Time_Delta"]).split('days ')[-1].split('.')[0]}")
-        st.write(f"**VO2:** {df.iloc[vt2_idx]["VO2"]:.3f} L/min")
-        st.write(f"**% VO2Max:** {((df.iloc[vt2_idx]["VO2"] / df["VO2"].max()) * 100):.1f} %")
-        st.write(f"**VCO2:** {df.iloc[vt2_idx]["VCO2"]:.3f} L/min")
+        st.write(f"**Time:** {str(df.iloc[vt2_idx]['Time']).split('days ')[-1].split('.')[0]}")
+        st.write(f"**VO2:** {df.iloc[vt2_idx]['VO2']:.3f} L/min")
+        st.write(f"**% VO2Max:** {((df.iloc[vt2_idx]['VO2'] / df["VO2"].max()) * 100):.1f} %")
+        st.write(f"**VCO2:** {df.iloc[vt2_idx]['VCO2']:.3f} L/min")
     with col6:
-        st.write(f"**RER:** {df.iloc[vt2_idx]["VCO2"] / df.iloc[vt2_idx]["VO2"]:.2f}")
-        st.write(f"**HR:** {df.iloc[vt2_idx]["HR"]:.0f}")
-        st.write(f"**% HRMax:** {((df.iloc[vt2_idx]["HR"] / df["HR"].max()) * 100):.1f} %")
+        st.write(f"**RER:** {df.iloc[vt2_idx]['VCO2'] / df.iloc[vt2_idx]["VO2"]:.2f}")
+        st.write(f"**HR:** {df.iloc[vt2_idx]['HR']:.0f}")
+        st.write(f"**% HRMax:** {((df.iloc[vt2_idx]['HR'] / df["HR"].max()) * 100):.1f} %")
     
     # --- PLOTTING ------------------------------------------------------------------------------------------------------
     DATA_SIZE = 8
@@ -177,26 +183,26 @@ def populate_threshold_tab(met_test):
     fig.add_trace(go.Scatter(x=x_seg2, y=m_high*x_seg2 + b_high, name='Upper Regression', line=dict(color='red', width=1.5)), row=1, col=1)
     
     # --- ROW 1, COL 2: Ventilatory Equivalents --------------------------------------------------------------------------
-    # Ve/VO2
+    # VE/VO2
     fig.add_trace(go.Scatter(x=df['VO2'], 
-                             y=df['Ve/VO2'], 
+                             y=df['VE/VO2'], 
                              mode='lines+markers', 
-                             name='Ve/VO2', 
+                             name='VE/VO2', 
                              marker=dict(color='blue', size=DATA_SIZE, opacity=0.9, line=dict(width=1.5, color='white')), 
                              line=dict(width=0.5, color='blue')), 
                   row=1, col=2)
     
-    # Ve/VCO2
+    # VE/VCO2
     fig.add_trace(go.Scatter(x=df['VO2'], 
-                             y=df['Ve/VCO2'], 
+                             y=df['VE/VCO2'], 
                              mode='lines+markers', 
-                             name='Ve/VCO2', 
+                             name='VE/VCO2', 
                              marker=dict(color='red', size=DATA_SIZE, opacity=0.9, line=dict(width=1.5, color='white')), 
                              line=dict(width=0.5, color='red')), 
                   row=1, col=2)
     
     # Set range
-    combined_ve_data = pd.concat([df['Ve/VO2'], df['Ve/VCO2']])
+    combined_ve_data = pd.concat([df['VE/VO2'], df['VE/VCO2']])
     vent_eq_min = 20
     while vent_eq_min >= combined_ve_data.min():
         vent_eq_min -= 5

@@ -6,13 +6,6 @@ from scipy.ndimage import gaussian_filter1d
 
 class MetabolicTest:
     def __init__(self, test_file):       
-        self.dob = None
-        self.age = None
-        self.gender = None
-        self.height = None
-        self.weight = None
-        self.test_date = None
-        self.test_time = None
         self.test_file = test_file
         self.raw_df = None
         self.exercise_df = None
@@ -20,57 +13,38 @@ class MetabolicTest:
         self.load_data()
 
     def load_data(self):
-        #try:
-        meta_df = pd.read_excel(self.test_file, header=None, nrows=9, usecols="A:H")
-        if "Gender" in meta_df.iloc[4, 0]:
-            self.gender = meta_df.iloc[4, 1]
-            self.age = meta_df.iloc[5, 1]
-            self.height = meta_df.iloc[6, 1]
-            self.weight = meta_df.iloc[7, 1]
-        else:
-            self.dob = meta_df.iloc[3, 1]
-            self.gender = meta_df.iloc[5, 1]
-            self.height = meta_df.iloc[7, 1]
-            self.weight = meta_df.iloc[8, 1]
-        self.test_date = meta_df.iloc[0, 4]
-        self.test_time = meta_df.iloc[1, 4]
-
         all_headers = pd.read_excel(self.test_file, header=0, nrows=0).columns.tolist()
         data_df = pd.read_excel(self.test_file, skiprows=2, names=all_headers)
-
-        target_cols = ["Time", "t", "Rf", "Ve", "VE", "VO2", "VCO2", "RQ", "HR", "Phase", "PetO2", "PetCO2"]
-        available_cols = [c for c in target_cols if c in data_df.columns]
         
+        # Extract and Rename Columns
+        target_cols = ["Time", "t", "Rf", "Ve", "VE", "VO2", "VCO2", "RQ", "VE/VO2", "VE/VCO2", "HR", "Phase", "PetO2", "PetCO2", "Fat"]
+        available_cols = [c for c in target_cols if c in data_df.columns]
         self.raw_df = data_df[available_cols].copy()
         
-        # Rename columns
-        self.raw_df.rename(columns={'RQ': 'RER'}, inplace=True)
-        if "t" in self.raw_df.columns:
-           self.raw_df.rename(columns={'t': 'Time'}, inplace=True)
-        if "VE" in self.raw_df.columns:
-           self.raw_df.rename(columns={'VE': 'Ve'}, inplace=True)
+        variable_dict = {'RQ': 'RER', 't': 'Time', 'VE': 'Ve'}
+        for k, v in variable_dict.items():
+            if k in self.raw_df.columns:
+                print(f'k:v: {k}: {v}')
+                self.raw_df.rename(columns={k: v}, inplace=True)
         
-        self.raw_df.dropna(subset=['Time'], inplace=True)
+        # Remove any extra rows
+        self.raw_df = self.raw_df.dropna(subset=['Time']).reset_index(drop=True)
         
         # Convert VO2 and VCO2 to L/min
         self.raw_df['VO2'] = self.raw_df['VO2'] / 1000
         self.raw_df['VCO2'] = self.raw_df['VCO2'] / 1000
         
-        self.raw_df['Time_Delta'] = self.raw_df['Time'].apply(
-            lambda t: pd.to_timedelta(t) if isinstance(t, str) else pd.to_timedelta(t.strftime('%H:%M:%S'))
-        )
-        self.raw_df = self.raw_df.drop('Time', axis=1).set_index('Time_Delta')
+        # Calculate excess CO2 and excess VE
+        self.raw_df['excess_co2'] = self.raw_df["VCO2"]**2 / (self.raw_df["VO2"] + 1e-8) - self.raw_df["VCO2"]
+        self.raw_df['excess_Ve'] = self.raw_df["Ve"]**2 / (self.raw_df["VCO2"] + 1e-8) - self.raw_df["Ve"]
         
-        # Get calculated parameters
-        self._update_calculated_parameters(self.raw_df)
-        
-        # Get the Exercise phase
+        # Filter for Exercise phase
         self.exercise_df = self.raw_df[self.raw_df['Phase'].astype(str).str.contains('Exercise', case=False, na=False)].copy()
         
         # Sort by VO2
         self.exercise_df = self.exercise_df.reset_index().sort_values(by='VO2', ascending=True).reset_index(drop=True)
         
-        # Remove before RER Nadir and after RER > 1.05
+        # Trim by RER
         min_rer_idx = self.exercise_df['RER'].idxmin()
         self.exercise_df = self.exercise_df.loc[min_rer_idx:].copy()
         self.exercise_df = self.exercise_df[self.exercise_df['RER'] <= 1.05].reset_index(drop=True)
@@ -80,20 +54,6 @@ class MetabolicTest:
         
         # Initialize edited_df
         self.exercise_df_edited = self.exercise_df.copy()
-
-        #except Exception as e:
-        #    print(f"Error loading file: {e}")
-    
-    def _update_calculated_parameters(self, df):     
-        # Ventilatory equivalents
-        df['Ve/VO2'] = (df['Ve'] - df['Rf'] * 0.07) / (df['VO2'] + 1e-8)
-        df['Ve/VCO2'] = (df['Ve'] - df['Rf'] * 0.07) / (df['VCO2'] + 1e-8)
-
-        # Fat (g/min)
-        df['Fat'] = np.maximum(0, (1.695 * df['VO2'] - 1.701 * df['VCO2']))
-        
-        # Excess CO2
-        df['excess_co2'] = df["VCO2"]**2 / (df["VO2"] + 1e-8) - df["VCO2"]
     
     def apply_smoothing(self, method, value, selected_methods):
         assert(method in ["None", "Rolling", "Gaussian"])
@@ -126,8 +86,8 @@ class MetabolicTest:
         # VCO2 vs. VO2
         df['VCO2vs.VO2'] = self._segmented_regression('VCO2', df)
         
-        # Ve/VO2 vs. VO2
-        df['Ve/VO2vs.VO2'] = self._segmented_regression('Ve/VO2', df)
+        # VE/VO2 vs. VO2
+        df['VE/VO2vs.VO2'] = self._segmented_regression('VE/VO2', df)
         
         # Excess CO2
         df['ExcessCO2vs.VO2'] = self._segmented_regression('excess_co2', df)
@@ -190,8 +150,6 @@ class MetabolicTest:
         # Fit single regression line through all data
         global_regr = LinearRegression().fit(vo2, vco2)
         global_regr_vco2 = global_regr.predict(vo2)
-        
-        # Line equation: y = m*x + b
         m_global = global_regr.coef_[0][0]
         b_global = global_regr.intercept_[0]
 
