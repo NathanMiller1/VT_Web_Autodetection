@@ -24,7 +24,6 @@ class MetabolicTest:
         variable_dict = {'RQ': 'RER', 't': 'Time', 'VE': 'Ve'}
         for k, v in variable_dict.items():
             if k in self.raw_df.columns:
-                print(f'k:v: {k}: {v}')
                 self.raw_df.rename(columns={k: v}, inplace=True)
         
         # Remove any extra rows
