@@ -10,9 +10,8 @@ class MetabolicTest:
         self.raw_df = None
         self.exercise_df = None
         self.exercise_df_edited = None
-        self.load_data()
-
-    def load_data(self):
+        self.rer_cutoff_vo2 = None
+        
         all_headers = pd.read_excel(self.test_file, header=0, nrows=0).columns.tolist()
         data_df = pd.read_excel(self.test_file, skiprows=2, names=all_headers)
         
@@ -40,13 +39,19 @@ class MetabolicTest:
         # Filter for Exercise phase
         self.exercise_df = self.raw_df[self.raw_df['Phase'].astype(str).str.contains('Exercise', case=False, na=False)].copy()
         
+        # Find RER cutoff VO2 from time-ordered data (before VO2 sort): i.e., last point point where RER < 1.0
+        if 'RER' in self.exercise_df.columns:
+            below_one = self.exercise_df[self.exercise_df['RER'] < 1.0]
+            if not below_one.empty:
+                self.rer_cutoff_vo2 = below_one.iloc[-1]['VO2']
+        
         # Sort by VO2
         self.exercise_df = self.exercise_df.reset_index().sort_values(by='VO2', ascending=True).reset_index(drop=True)
         
         # Trim by RER
         min_rer_idx = self.exercise_df['RER'].idxmin()
         self.exercise_df = self.exercise_df.loc[min_rer_idx:].copy()
-        self.exercise_df = self.exercise_df[self.exercise_df['RER'] <= 1.05].reset_index(drop=True)
+        self.exercise_df = self.exercise_df[self.exercise_df['RER'] <= 1.07].reset_index(drop=True)
         
         # Update error values for the base exercise set
         self._calculate_error_values(self.exercise_df)
@@ -74,7 +79,10 @@ class MetabolicTest:
         df['FatMaxMask'] = (df.index <= df['Fat'].idxmax()).astype(float)
         
         # RER > 1.0 Mask
-        df['RER>1.0Mask'] = (df['RER'] > 1.0).astype(float)
+        if self.rer_cutoff_vo2 is not None:
+            df['RER>1.0Mask'] = (df['VO2'] > self.rer_cutoff_vo2).astype(float)
+        else:
+            df['RER>1.0Mask'] = 0.0
         
         # RER=0.85
         df['RER=0.85'] = self._normalize_errors((df['RER'] - 0.85).abs())
