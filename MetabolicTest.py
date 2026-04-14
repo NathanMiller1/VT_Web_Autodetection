@@ -3,6 +3,7 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error
 from scipy.ndimage import gaussian_filter1d
+from scipy.special import logsumexp
 
 class MetabolicTest:
     def __init__(self, test_file):       
@@ -32,92 +33,127 @@ class MetabolicTest:
         self.raw_df['VO2'] = self.raw_df['VO2'] / 1000
         self.raw_df['VCO2'] = self.raw_df['VCO2'] / 1000
         
-        # Calculate excess CO2 and excess VE
+        # excess CO2 and Excess VE
         self.raw_df['excess_co2'] = self.raw_df["VCO2"]**2 / (self.raw_df["VO2"] + 1e-8) - self.raw_df["VCO2"]
         self.raw_df['excess_Ve'] = self.raw_df["Ve"]**2 / (self.raw_df["VCO2"] + 1e-8) - self.raw_df["Ve"]
         
         # Filter for Exercise phase
         self.exercise_df = self.raw_df[self.raw_df['Phase'].astype(str).str.contains('Exercise', case=False, na=False)].copy()
         
-        # Find RER cutoff VO2 from time-ordered data (before VO2 sort): i.e., last point point where RER < 1.0
+        # Find RER cutoff VO2
         if 'RER' in self.exercise_df.columns:
             below_one = self.exercise_df[self.exercise_df['RER'] < 1.0]
             if not below_one.empty:
-                self.rer_cutoff_vo2 = below_one.iloc[-1]['VO2']
+                self.rer_cutoff_vo2 = below_one.iloc[-1]['VO2']    
         
-        # Sort by VO2
-        self.exercise_df = self.exercise_df.reset_index().sort_values(by='VO2', ascending=True).reset_index(drop=True)
+        # Initial Sort and Trim
+        self.exercise_df = self.exercise_df.sort_values(by='VO2').reset_index(drop=True)
+        if not self.exercise_df.empty and 'RER' in self.exercise_df.columns:
+            min_rer_idx = self.exercise_df['RER'].idxmin()
+            self.exercise_df = self.exercise_df.loc[min_rer_idx:].copy()
+            self.exercise_df = self.exercise_df[self.exercise_df['RER'] <= 1.07].reset_index(drop=True)
         
-        # Trim by RER
-        min_rer_idx = self.exercise_df['RER'].idxmin()
-        self.exercise_df = self.exercise_df.loc[min_rer_idx:].copy()
-        self.exercise_df = self.exercise_df[self.exercise_df['RER'] <= 1.07].reset_index(drop=True)
+        # Calculated normalized errors for each method
+        self.exercise_df['FatMaxMask'] = (self.exercise_df.index <= self.exercise_df['Fat'].idxmax()).astype(float)
+        self.exercise_df['RER>1.0Mask'] = (self.exercise_df['VO2'] > self.rer_cutoff_vo2).astype(float) if self.rer_cutoff_vo2 else 0.0
+        self.exercise_df['RER=0.85'] = self._normalize_errors((self.exercise_df['RER'] - 0.85).abs())
+        self.exercise_df['V-Slope'] = self._detect_vt1_vslope_1986(self.exercise_df)
+        self.exercise_df['VCO2vs.VO2'] = self._segmented_regression('VCO2', self.exercise_df)
+        self.exercise_df['VE/VO2vs.VO2'] = self._segmented_regression('VE/VO2', self.exercise_df)
+        self.exercise_df['ExcessCO2vs.VO2'] = self._segmented_regression('excess_co2', self.exercise_df)
+        if 'PetO2' in self.exercise_df.columns:
+            self.exercise_df['PetO2vs.VO2'] = self._segmented_regression('PetO2', self.exercise_df)
         
-        # Update error values for the base exercise set
-        self._calculate_error_values(self.exercise_df)
-        
-        # Initialize edited_df
         self.exercise_df_edited = self.exercise_df.copy()
     
-    def apply_smoothing(self, method, value, selected_methods):
-        assert(method in ["None", "Rolling", "Gaussian"])
-        
-        # Fresh copy of original data
-        df = self.exercise_df.copy()
-        
-        if method != "None":
-            available_cols = [col for col in selected_methods if col in df.columns]
-            if method == "Rolling":
-                df[available_cols] = df[available_cols].rolling(window=int(value), center=True).mean().ffill().bfill()
-            elif method == "Gaussian":
-                df[available_cols] = gaussian_filter1d(df[available_cols], sigma=float(value), axis=0)
+    def smooth_series(self, series, filter_type, smooth_val):
+        if filter_type == 'None':
+            return series
+        if filter_type == 'Rolling':
+            if smooth_val <= 0:
+                smooth_val = 3
+            return series.rolling(window=int(smooth_val), center=True, min_periods=1).mean()
+        if filter_type == 'Gaussian':
+            if smooth_val <= 0:
+                smooth_val = 0.25
+            return pd.Series(gaussian_filter1d(series.values, sigma=smooth_val), index=series.index)
+        return series
+    
+    def _uniform_weights(self, method_cols):
+        """Equal weight for every method in the combination."""
+        w = 1.0 / len(method_cols)
+        return {col: w for col in method_cols} 
 
-        self.exercise_df_edited = df.reset_index(drop=True)
-    
-    def _calculate_error_values(self, df):
-        # FatMax Mask
-        df['FatMaxMask'] = (df.index <= df['Fat'].idxmax()).astype(float)
+    def compute_bayesian_ensemble(self, 
+                                  method_cols, 
+                                  smooth_type, 
+                                  smooth_val, 
+                                  smooth_scope, 
+                                  T, 
+                                  weights=None):
+        self.exercise_df_edited = self.exercise_df.copy() 
+        df = self.exercise_df_edited        
+        avail_method_cols = [col for col in method_cols if col in df.columns]
         
-        # RER > 1.0 Mask
-        if self.rer_cutoff_vo2 is not None:
-            df['RER>1.0Mask'] = (df['VO2'] > self.rer_cutoff_vo2).astype(float)
-        else:
-            df['RER>1.0Mask'] = 0.0
+        if not avail_method_cols:
+            return np.zeros(len(df)), np.zeros(len(df)), np.zeros(len(df))
         
-        # RER=0.85
-        df['RER=0.85'] = self._normalize_errors((df['RER'] - 0.85).abs())
+        # Optional: Individual smoothing of MSE errors
+        if smooth_type != "None" and smooth_scope in ['Individual', 'Both (Individual + Average)']:
+            cols_to_smooth = [col for col in avail_method_cols if 'Mask' not in col]
+            for col in cols_to_smooth:
+                df[col] = self.smooth_series(df[col], smooth_type, smooth_val)
         
-        # V-Slope
-        df['V-Slope'] = self._detect_vt1_vslope_1986(df)
+        if weights is None:
+            weights = self._uniform_weights(avail_method_cols)
         
-        # VCO2 vs. VO2
-        df['VCO2vs.VO2'] = self._segmented_regression('VCO2', df)
+        # Apply negative log softmax with temperature
+        log_probs_list = []
+        for col in avail_method_cols:
+            z = -df[col].values.astype(float) / T  # Higher error -> more negative value
+            finite_mask = np.isfinite(z)
+            if finite_mask.any():
+                lse = logsumexp(z[finite_mask])
+                log_p = np.full(len(df), -np.inf)
+                log_p[finite_mask] = z[finite_mask] - lse
+                log_probs_list.append(log_p * weights.get(col, 0.0))
+
+        if not log_probs_list:
+            return np.zeros(len(df)), np.zeros(len(df)), np.zeros(len(df))
+
+        # Sum results for each method: i.e., Product of Experts
+        combined_log_p = np.sum(log_probs_list, axis=0)
         
-        # VE/VO2 vs. VO2
-        df['VE/VO2vs.VO2'] = self._segmented_regression('VE/VO2', df)
+        # Optional: Smooth the combined log-result
+        if smooth_type != "None" and smooth_scope in ['Average', 'Both (Individual + Average)']:
+            valid_mask = np.isfinite(combined_log_p)
+            if valid_mask.any():
+                # Fill -inf with a very small number for smoothing instead of 0 
+                # to avoid artificial probability spikes at the edges
+                fill_val = np.nanmin(combined_log_p[valid_mask]) - 10 
+                temp_series = pd.Series(np.where(valid_mask, combined_log_p, fill_val))
+                smooth_vals = self.smooth_series(temp_series, smooth_type, smooth_val).values
+                combined_log_p = np.where(valid_mask, smooth_vals, -np.inf)
         
-        # Excess CO2
-        df['ExcessCO2vs.VO2'] = self._segmented_regression('excess_co2', df)
+        # Exponentiate and Normalize
+        finite_final = np.isfinite(combined_log_p)
+        if not finite_final.any():
+            return combined_log_p, np.zeros(len(df)), np.zeros(len(df))
+        final_lse = logsumexp(combined_log_p[finite_final])
+        posterior = np.where(finite_final, np.exp(combined_log_p - final_lse), 0.0)
+        cdf = np.nancumsum(posterior)
         
-        # PetO2 vs. VO2
-        if 'PetO2' in df.columns:
-            df['PetO2vs.VO2'] = self._segmented_regression('PetO2', df)
-    
+        return combined_log_p, posterior, cdf
+
     def _normalize_errors(self, results):
-        # --- NORMALIZE ERROR (0 to 1) ---
-        e_min = min(x for x in results if x > 0)
-        e_max = max(results)
-        
-        # Set skipped rows to max error (first/last 4 rows, V-Slope points above global regression line)
-        results = [x if x >= 0 else e_max for x in results]
-        
+        res_arr = np.array(results)
+        valid = res_arr[res_arr >= 0]
+        if len(valid) == 0: return [0.0] * len(results)
+        e_min, e_max = np.min(valid), np.max(valid)
+        processed = np.where(res_arr >= 0, res_arr, e_max)
         if e_max > e_min:
-            results = [((x - e_min) / (e_max - e_min)) for x in results]
-        else:
-            # Handle edge case where all errors are equal
-            results = [0.0] * len(results)
-        
-        return results
+            return ((processed - e_min) / (e_max - e_min)).tolist()
+        return [0.0] * len(results)
     
     def _segmented_regression(self, y_name, df):
         # Reshape data
@@ -142,7 +178,7 @@ class MetabolicTest:
             error = mean_squared_error(y1, model1.predict(x1)) + mean_squared_error(y2, model2.predict(x2))
             results.append(error)
 
-        return self._normalize_errors(results)   
+        return self._normalize_errors(results)
     
     def _detect_vt1_vslope_1986(self, df):
         """

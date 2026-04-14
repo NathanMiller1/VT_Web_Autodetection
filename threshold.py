@@ -3,10 +3,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LinearRegression
-from scipy.ndimage import gaussian_filter1d
 from MetabolicTest import MetabolicTest
-from helpers import increment_idx, decrement_idx
 
 def load_threshold_tab():
     if 'met_test' in st.session_state:
@@ -15,173 +12,90 @@ def load_threshold_tab():
         st.warning("Please upload a file.")
 
 def apply_ensemble_logic(met_test):    
-    active_smooth = st.session_state.get('active_smoothing', 'None')
+    active_smooth = st.session_state.get('smooth_type', 'None')
     smooth_val = st.session_state.get('roll_val' if active_smooth == "Rolling" else 'gauss_val', 0)
     smooth_scope = st.session_state.get('smooth_scope')
+    selected_methods = st.session_state.get('selected_options', [])
+    T = st.session_state.get('T')
     
-    # Selected threshold methods
-    all_selected = st.session_state.get('selected_options', [])
-    
-    # Ensure selected methods exist in the dataset
-    all_selected = [col for col in all_selected if col in met_test.exercise_df.columns]
-    
-    # Remove masks for smoothing
-    all_selected_no_mask = [item for item in all_selected if "Mask" not in item]
-    
-    if smooth_scope == "Both (Individual + Average)":
-        # This updates met_test.exercise_df_edited and all its error columns
-        met_test.apply_smoothing(active_smooth, smooth_val, all_selected_no_mask)
-        df = met_test.exercise_df_edited
-    else:
-        met_test.exercise_df_edited = met_test.exercise_df.copy()
-        df = met_test.exercise_df_edited
+    # Compute Bayesian Ensemble
+    if selected_methods:
+        _, post, cdf = met_test.compute_bayesian_ensemble(selected_methods, active_smooth, smooth_val, smooth_scope, T, weights=None)
+        
+        st.session_state['posterior'] = post
+        st.session_state['cdf'] = cdf
+        st.session_state['vt1_MAP_idx'] = int(np.argmax(post))
+        st.session_state['vt1_Mean'] = np.nansum(post * met_test.exercise_df_edited['VO2'].values)
 
-    df['Ensemble_Error'] = df[all_selected].mean(axis=1)
-
-    # Final Smoothing pass on the Ensemble error
-    if active_smooth == "Rolling":
-        df['Ensemble_Error'] = df['Ensemble_Error'].rolling(window=int(st.session_state.roll_val), center=True).mean().ffill().bfill()
-    elif active_smooth == "Gaussian":
-        df['Ensemble_Error'] = gaussian_filter1d(df['Ensemble_Error'], sigma=float(st.session_state.gauss_val))
-    
-    df['Ensemble_Error'] = met_test._normalize_errors(df['Ensemble_Error'])
-    
 def populate_threshold_tab(met_test):
-    # --- INITIALIZE DEFAULTS ---
-    if 'active_smoothing' not in st.session_state:
-        st.session_state.active_smoothing = "Gaussian"
-    if 'smooth_scope' not in st.session_state:
-        st.session_state.smooth_scope = "Both (Individual + Average)"
-    if 'use_gauss' not in st.session_state:
-        st.session_state.use_gauss = True
-    if 'use_roll' not in st.session_state:
-        st.session_state.use_roll = False
+    st.sidebar.header("Threshold Settings")
     
-    # Keep track of the settings for the ensemble method
-    if 'last_settings_hash' not in st.session_state:
-        st.session_state.last_settings_hash = None
+    # Methods to Ensemble
+    opts = ["FatMaxMask", "RER>1.0Mask", "V-Slope", "VCO2vs.VO2", "VE/VO2vs.VO2", "ExcessCO2vs.VO2", "RER=0.85", "PetO2vs.VO2"]
+    default_opts = ["FatMaxMask", "RER>1.0Mask", "VCO2vs.VO2", "ExcessCO2vs.VO2", "RER=0.85"]
     
-    # --- UI CONTROLS ------------------------------------------------------------------------------------------------
-    c1, c2 = st.columns(2)
-    
-    with c1:
-        use_roll = st.checkbox("Rolling Average", key="use_roll", disabled=st.session_state.get("use_gauss", False))
-        use_gauss = st.checkbox("Gaussian Smooth", key="use_gauss", disabled=st.session_state.get("use_roll", False))
-        
-        # Sync state
-        if use_roll: st.session_state.active_smoothing = "Rolling"
-        elif use_gauss: st.session_state.active_smoothing = "Gaussian"
-        else: st.session_state.active_smoothing = "None"
+    st.sidebar.write("### Methods to Ensemble")
+    selected_methods = []
+    for opt in opts:
+        # This creates a vertical list that is always "tall" and visible
+        if st.sidebar.checkbox(opt, value=(opt in default_opts), key=f"check_{opt}"):
+            selected_methods.append(opt)
 
-        if use_roll: st.select_slider("Window Size", [3, 5, 7, 9, 11], 5, key="roll_val")
-        if use_gauss: st.slider("Sigma (Width)", 0.25, 3.0, 1.0, 0.25, key="gauss_val")
-        if use_roll or use_gauss: st.radio("Apply Smoothing To:", ["Final Average Only", "Both (Individual + Average)"], key="smooth_scope", index=0)
-        
-    with c2:
-        # Match names to the keys created in MetabolicTest.update_error_values
-        opts = ["FatMaxMask", "RER>1.0Mask", "V-Slope", "VCO2vs.VO2", "VE/VO2vs.VO2", "ExcessCO2vs.VO2", "RER=0.85", "PetO2vs.VO2"]
-        default_opts = ["FatMaxMask", "RER>1.0Mask", "VCO2vs.VO2", "ExcessCO2vs.VO2", "RER=0.85"]
-        st.multiselect("Ensemble Components", options=opts, default=default_opts, key="selected_options")
-        
-    st.divider()
+    # Then pass selected_methods to your logic
+    st.session_state['selected_options'] = selected_methods
     
-    # Generate a "hash" of current settings to see if we should auto-recalculate
-    current_settings = (
-        getattr(met_test, 'test_file', None),
-        st.session_state.active_smoothing,
-        st.session_state.get('roll_val', 0),
-        st.session_state.get('gauss_val', 0),
-        st.session_state.selected_options,
-        st.session_state.get('smooth_scope')
-    )
+    # Smoothing Type
+    st.sidebar.radio("Smoothing Type", ["None", "Rolling", "Gaussian"], key="smooth_type", index=2, on_change=apply_ensemble_logic, args=(met_test,))
+    
+    # Smoothing Value
+    if st.session_state.smooth_type == 'Rolling':
+        st.sidebar.select_slider("Window Size", [3, 5, 7, 9, 11], 5, key="roll_val")
+    elif st.session_state.smooth_type == 'Gaussian':
+        st.sidebar.slider("Sigma (Width)", 0.25, 5.0, 2.0, 0.25, key="gauss_val")
+        
+    # Smoothing Scope
+    if st.session_state.smooth_type != 'None':
+        st.sidebar.radio("Smoothing Scope", ["Both (Individual + Average)", "Final Average Only"], key="smooth_scope", on_change=apply_ensemble_logic, args=(met_test,))
+    
+    # Temperature (T)
+    st.sidebar.slider("Temperature (T)", 0.005, 0.2, 0.035, 0.005, key="T", format="%.3f", help="Controls how 'peaky' the probability distribution is.")
     
     apply_ensemble_logic(met_test)
     df = met_test.exercise_df_edited
-    
-    settings_changed = current_settings != st.session_state.last_settings_hash
-    
-    if 'manual_vt1_idx' not in st.session_state or settings_changed:
-        best_vt1_label = df['Ensemble_Error'].idxmin()
-        best_vt2_label = int(len(df)/3*2)
-        st.session_state.manual_vt1_idx = df.index.get_loc(best_vt1_label)
-        st.session_state.manual_vt2_idx = best_vt2_label
-        st.session_state.last_settings_hash = current_settings
-    
-    # Helper for safe plotting values
-    vt1_idx = st.session_state.manual_vt1_idx
-    vt2_idx = st.session_state.manual_vt2_idx
-    
-    # --- 
-        
-    # Navigation Buttons
-    col1, col2, col3, col4, col5, col6 = st.columns([1, 1, 1, 1, 1, 1])
-    # VT1
-    with col1:
-        st.markdown("## 🟢 VT1")
-        st.button("⬅️ Previous", on_click=decrement_idx, args=("manual_vt1_idx",), key="manual_vt1_prev")
-        st.button("Next ➡️", on_click=increment_idx, args=(len(df) - 1, "manual_vt1_idx"), key="manual_vt1_next")
-    with col2:
-        st.write(f"**Time:** {str(df.iloc[vt1_idx]['Time']).split('days ')[-1].split('.')[0]}")
-        st.write(f"**VO2:** {df.iloc[vt1_idx]['VO2']:.3f} L/min")
-        st.write(f"**% VO2Max:** {((df.iloc[vt1_idx]['VO2'] / df["VO2"].max()) * 100):.1f} %")
-        st.write(f"**VCO2:** {df.iloc[vt1_idx]['VCO2']:.3f} L/min")
-    with col3:
-        st.write(f"**RER:** {df.iloc[vt1_idx]['VCO2'] / df.iloc[vt1_idx]["VO2"]:.2f}")
-        st.write(f"**HR:** {df.iloc[vt1_idx]['HR']:.0f}")
-        st.write(f"**% HRMax:** {((df.iloc[vt1_idx]['HR'] / df["HR"].max()) * 100):.1f} %")
-    
-    # VT2
-    with col4:
-        st.markdown("## 🟠 VT2")
-        st.button("⬅️ Previous", on_click=decrement_idx, args=("manual_vt2_idx",), key="manual_vt2_prev")
-        st.button("Next ➡️", on_click=increment_idx, args=(len(df) - 1, "manual_vt2_idx"), key="manual_vt2_next")
-    with col5:
-        st.write(f"**Time:** {str(df.iloc[vt2_idx]['Time']).split('days ')[-1].split('.')[0]}")
-        st.write(f"**VO2:** {df.iloc[vt2_idx]['VO2']:.3f} L/min")
-        st.write(f"**% VO2Max:** {((df.iloc[vt2_idx]['VO2'] / df["VO2"].max()) * 100):.1f} %")
-        st.write(f"**VCO2:** {df.iloc[vt2_idx]['VCO2']:.3f} L/min")
-    with col6:
-        st.write(f"**RER:** {df.iloc[vt2_idx]['VCO2'] / df.iloc[vt2_idx]["VO2"]:.2f}")
-        st.write(f"**HR:** {df.iloc[vt2_idx]['HR']:.0f}")
-        st.write(f"**% HRMax:** {((df.iloc[vt2_idx]['HR'] / df["HR"].max()) * 100):.1f} %")
-    
-    # --- PLOTTING ------------------------------------------------------------------------------------------------------
+    vt1_MAP_idx = st.session_state.get('vt1_MAP_idx', 0)
+    vt1_Mean = st.session_state.get('vt1_Mean', 0)
+    selected_methods = st.session_state.get('selected_options', [])
+
+    # --- PLOTTING ---
     DATA_SIZE = 8
-    INDICATOR_SIZE = 10
+
+    fig = make_subplots(
+        rows=4, cols=2, 
+        vertical_spacing=0.06,
+        row_heights=[1.0, 1.0, 0.7, 0.7],
+        specs=[
+            [{}, {}], 
+            [{}, {"secondary_y": True}], 
+            [{"colspan": 2}, None], 
+            [{"colspan": 2}, None]
+        ],
+        subplot_titles=(
+            "V-Slope (VCO2 vs VO2)", "Ventilatory Equivalents", 
+            "Excess Metrics", "End-Tidal Gases (PetO2/CO2)", 
+            "Individual Normalized Error Curves", 
+            "Ensemble Consensus: VT1 Location Probability"
+        )
+    )
     
-    fig = make_subplots(rows=3, cols=2,
-                        subplot_titles=("V-Slope (VCO2 vs VO2)", "Ventilatory Equivalents", "Excess CO2", "End-Tidal Gases", "Ensemble Error Profile"),
-                        horizontal_spacing=0.08, vertical_spacing=0.08,
-                        # Enable secondary_y for the rows where you want two axes
-                        specs=[[{}, {}], [{"secondary_y": True}, {"secondary_y": True}], [{"colspan": 2}, None]])
     
-    # --- ROW 1, COL 1: V-SLOPE -----------------------------------------------------------------------------------------    
-    # VCO2 vs. VO2
-    fig.add_trace(go.Scatter(x=df['VO2'], 
-                             y=df['VCO2'], 
-                             mode='markers', 
-                             name='VCO2 vs. VO2', 
-                             marker=dict(color='gray', size=DATA_SIZE, opacity=0.9, line=dict(width=1, color='white'))), 
-                  row=1, col=1)
-    
-    # Global Line
-    X = df['VO2'].values.reshape(-1, 1)
-    y = df['VCO2'].values
-    model_g = LinearRegression().fit(X, y)
-    m_g, b_g = model_g.coef_[0], model_g.intercept_
-    x_range = np.array([df['VO2'].min(), df['VO2'].max()])
-    fig.add_trace(go.Scatter(x=x_range, y=m_g*x_range + b_g, name='Global Regression', line=dict(color='black', dash='dash', width=1.5)), row=1, col=1)
-    
-    # Segments
-    m_low, b_low = np.polyfit(df['VO2'].iloc[:vt1_idx], df['VCO2'].iloc[:vt1_idx], 1)
-    m_high, b_high = np.polyfit(df['VO2'].iloc[vt1_idx:], df['VCO2'].iloc[vt1_idx:], 1)
-    
-    x_seg1 = df['VO2'].iloc[:vt1_idx+1]
-    fig.add_trace(go.Scatter(x=x_seg1, y=m_low*x_seg1 + b_low, name='Lower Regression', line=dict(color='blue', width=1.5)), row=1, col=1)
-    
-    x_seg2 = df['VO2'].iloc[vt1_idx:]
-    fig.add_trace(go.Scatter(x=x_seg2, y=m_high*x_seg2 + b_high, name='Upper Regression', line=dict(color='red', width=1.5)), row=1, col=1)
-    
+    # V-Slope (Row 1, Col 1)
+    fig.add_trace(go.Scatter(x=df['VO2'], y=df['VCO2'], mode='markers', name='Data'), row=1, col=1)
+    if vt1_MAP_idx > 2 and (len(df) - vt1_MAP_idx) > 2:
+        m1, b1 = np.polyfit(df['VO2'].iloc[:vt1_MAP_idx], df['VCO2'].iloc[:vt1_MAP_idx], 1)
+        m2, b2 = np.polyfit(df['VO2'].iloc[vt1_MAP_idx:], df['VCO2'].iloc[vt1_MAP_idx:], 1)
+        fig.add_trace(go.Scatter(x=df['VO2'], y=m1*df['VO2']+b1, name='Low Segment'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df['VO2'], y=m2*df['VO2']+b2, name='High Segment'), row=1, col=1)
+
     # --- ROW 1, COL 2: Ventilatory Equivalents --------------------------------------------------------------------------
     # VE/VO2
     fig.add_trace(go.Scatter(x=df['VO2'], 
@@ -255,20 +169,60 @@ def populate_threshold_tab(met_test):
         fig.update_yaxes(range=[peto2_min, peto2_max], secondary_y=False, row=2, col=2)
         fig.update_yaxes(range=[petco2_min, petco2_max], secondary_y=True, row=2, col=2)
     
-    # --- ROW 3: Ensemble Plot ------------------------------------------------------------------------------------------------
-    for m in st.session_state.selected_options:
-        if m in df.columns:
-            fig.add_trace(go.Scatter(x=df['VO2'], y=df[m], 
-                                     name=m, line=dict(dash='dot', width=1), opacity=0.7), row=3, col=1)
+    # ROW 3: Individual Error Curves (Top Panel from your Matplotlib code)
+    for col in selected_methods:
+        if col in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df['VO2'], y=df[col],
+                mode='lines',
+                name=col,
+                line=dict(width=1),
+                opacity=0.4
+            ), row=3, col=1)
 
-    fig.add_trace(go.Scatter(x=df['VO2'], y=df['Ensemble_Error'], 
-                             name="ENSEMBLE_ERROR", line=dict(color='black', width=4)), row=3, col=1)
+    # ROW 4: Bayesian Posterior (Bottom Panel from your Matplotlib code)
+    if 'posterior' in st.session_state:
+        post = st.session_state['posterior']
+        cdf = st.session_state['cdf']
+        
+        # Main Posterior Curve
+        fig.add_trace(go.Scatter(
+            x=df['VO2'], y=post, 
+            name="Posterior", 
+            fill='tozeroy', 
+            line=dict(color='steelblue', width=2)
+        ), row=4, col=1)
+        
+        # 90% Credible Interval Shading
+        idx_low = np.searchsorted(cdf, 0.05)
+        idx_high = min(np.searchsorted(cdf, 0.95), len(df)-1)
+        ci_low, ci_high = df['VO2'].iloc[idx_low], df['VO2'].iloc[idx_high]
+        
+        fig.add_vrect(
+            x0=ci_low, x1=ci_high, 
+            fillcolor="dodgerblue", opacity=0.2, 
+            layer="below", line_width=0, 
+            row=4, col=1
+        )
 
-    # Threshold indicator lines
-    fig.add_vline(x=df['VO2'].iloc[st.session_state.manual_vt1_idx], line_color="LimeGreen", line_dash="dash", row="all", col="all")
-    #fig.add_vline(x=df['VO2'].iloc[st.session_state.manual_vt2_idx], line_color="DarkOrange", line_dash="dash", row="all", col="all")
+        # Global threshold lines
+        all_subplots = [(1, 1), (1, 2), (2, 1), (2, 2), (3, 1), (4, 1)]
+        for r, c in all_subplots:
+            # MAP Line (Red)
+            fig.add_vline(x=df['VO2'].iloc[vt1_MAP_idx], line_dash="dash", line_color="red", row=r, col=c, annotation_text="MAP")
+            # Mean Line (Yellow/Orange)
+            fig.add_vline(x=vt1_Mean, line_dash="dot", line_color="orange", row=r, col=c, annotation_text="Mean")
 
-    # Plot size and layout
-    fig.update_layout(height=2000, showlegend=False, template="plotly_white")
-    st.plotly_chart(fig, width='stretch')
+    # Formatting
+    fig.update_layout(height=1600, showlegend=False, template="plotly_white")
+    fig.update_xaxes(title_text="VO2 (L/min)", row=4, col=1)
+    fig.update_yaxes(title_text="Norm. Error", row=3, col=1)
+    fig.update_yaxes(title_text="Probability", row=4, col=1)
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Metrics
+    c1, c2 = st.columns(2)
+    c1.metric("VT1 MAP (VO2)", f"{df['VO2'].iloc[vt1_MAP_idx]:.3f} L/min")
+    c2.metric("VT1 Mean (VO2)", f"{vt1_Mean:.3f} L/min")
     
