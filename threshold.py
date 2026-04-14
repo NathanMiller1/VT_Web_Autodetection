@@ -88,14 +88,30 @@ def populate_threshold_tab(met_test):
     )
     
     
-    # V-Slope (Row 1, Col 1)
+    # --- V-Slope (Row 1, Col 1) ----------------------------------------------------------------------------------------
     fig.add_trace(go.Scatter(x=df['VO2'], y=df['VCO2'], mode='markers', name='Data'), row=1, col=1)
+    
+    # Calculate global max for 1:1 V-Slope scaling
+    v_slope_max = max(df['VO2'].max(), df['VCO2'].max()) * 1.05 # 5% padding
+    
+    # Line of Identity
+    fig.add_trace(go.Scatter(
+        x=[0, v_slope_max], y=[0, v_slope_max], 
+        mode='lines', line=dict(color='black', dash='dash', width=1),
+        name='Line of Identity'
+    ), row=1, col=1)
+    
+    
     if vt1_MAP_idx > 2 and (len(df) - vt1_MAP_idx) > 2:
         m1, b1 = np.polyfit(df['VO2'].iloc[:vt1_MAP_idx], df['VCO2'].iloc[:vt1_MAP_idx], 1)
         m2, b2 = np.polyfit(df['VO2'].iloc[vt1_MAP_idx:], df['VCO2'].iloc[vt1_MAP_idx:], 1)
         fig.add_trace(go.Scatter(x=df['VO2'], y=m1*df['VO2']+b1, name='Low Segment'), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['VO2'], y=m2*df['VO2']+b2, name='High Segment'), row=1, col=1)
-
+    
+    # Force the 1:1 square aspect ratio and start at 0
+    fig.update_xaxes(range=[0, v_slope_max], row=1, col=1)
+    fig.update_yaxes(range=[0, v_slope_max], row=1, col=1)
+    
     # --- ROW 1, COL 2: Ventilatory Equivalents --------------------------------------------------------------------------
     # VE/VO2
     fig.add_trace(go.Scatter(x=df['VO2'], 
@@ -219,7 +235,7 @@ def populate_threshold_tab(met_test):
     fig.update_yaxes(title_text="Norm. Error", row=3, col=1)
     fig.update_yaxes(title_text="Probability", row=4, col=1)
     
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     # Metrics
     c1, c2 = st.columns(2)
